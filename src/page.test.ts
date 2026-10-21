@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import html from '../index.html?raw';
+import css from './style.css?raw';
 
 const doc = new DOMParser().parseFromString(html, 'text/html');
 const TEL = 'tel:+16264944809';
@@ -87,5 +88,11 @@ describe('page', () => {
 
   it('has at least one placeholder', () => {
     expect(doc.querySelectorAll('.placeholder').length).toBeGreaterThan(0);
+  });
+
+  it('keeps nav link labels on one line', () => {
+    const rule = css.match(/\.nav-list\s+a\s*\{[^}]*\}/);
+    expect(rule).not.toBeNull();
+    expect(rule![0]).toMatch(/white-space\s*:\s*nowrap/);
   });
 });
