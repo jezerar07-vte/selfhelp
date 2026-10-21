@@ -120,4 +120,23 @@ describe('edge cases', () => {
   it('formats thousands with a comma', () => {
     expect(priceFor({ diameters: ['60', '60', '60'] })).toBe('$1,080–$1,295');
   });
+
+  it('rounds the high end once, from the unrounded value', () => {
+    // 21.18" × $6 = $127.08 → $125; × 1.2 = $152.496 → $150
+    expect(priceFor({ diameters: ['21.18'] })).toBe('$125–$150');
+  });
+
+  it.each(['0x10', '1e1', '+12'])('rejects %s as not a number', (text) => {
+    expect(estimate({ ...base, diameters: [text] }).kind).toBe('error');
+  });
+
+  it.each(['21.249', '21.2499'])('rejects %s for more than 2 decimal places', (text) => {
+    const result = estimate({ ...base, diameters: [text] });
+    expect(result.kind).toBe('error');
+    expect(result.kind === 'error' && result.errors[0].message).toBe('Use at most 2 decimal places.');
+  });
+
+  it('a digit string too long for a finite Number is a call', () => {
+    expect(estimate({ ...base, diameters: ['1' + '0'.repeat(400)] }).kind).toBe('call');
+  });
 });
