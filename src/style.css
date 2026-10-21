@@ -8,6 +8,10 @@
   --header-h: 7rem;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html {
   scroll-behavior: smooth;
   scroll-padding-top: var(--header-h);
@@ -277,4 +281,170 @@ nav {
   .cards {
     grid-template-columns: repeat(3, 1fr);
   }
+}
+
+/* Estimator */
+.estimator {
+  max-width: 36rem;
+}
+
+.estimator fieldset {
+  border: 1px solid #c9c4b8;
+  border-radius: 8px;
+  margin: 1rem 0;
+  padding: 0.5rem 0.75rem 0.75rem;
+  min-width: 0;
+}
+
+.estimator legend {
+  font-weight: 700;
+  padding: 0 0.25rem;
+}
+
+.est-row {
+  margin: 0 0 1rem;
+}
+
+.est-row label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.est-row-controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.est-row-controls input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  font-size: 1rem;
+  padding: 0 0.75rem;
+  border: 2px solid #6b665b;
+  border-radius: 6px;
+}
+
+.est-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 1rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1c1c1c;
+  background: #fff;
+  border: 2px solid #6b665b;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.est-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.est-check,
+.est-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.6rem 0;
+  box-sizing: border-box;
+}
+
+.est-check span,
+.est-radio span {
+  flex: 1 1 0;
+  min-width: 0;
+  line-height: 1.5rem;
+}
+
+.est-check .est-note {
+  display: block;
+}
+
+.est-options {
+  display: flex;
+  gap: 0.25rem 0.75rem;
+}
+
+.est-radio {
+  flex: 0 1 auto;
+}
+
+.est-radio span {
+  flex: 0 1 auto;
+  white-space: nowrap;
+}
+
+.est-check input,
+.est-radio input {
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 auto;
+}
+
+.est-note {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.est-error {
+  margin: 0.25rem 0 0;
+  color: #a10000;
+  font-weight: 600;
+}
+
+.est-row input[aria-invalid='true'] {
+  border-color: #a10000;
+}
+
+.est-result {
+  background: #fff;
+  border: 2px solid #1c1c1c;
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.est-result p {
+  margin: 0 0 0.5rem;
+}
+
+.est-result .est-result-error {
+  color: #a10000;
+  font-weight: 600;
+}
+
+.est-result-label {
+  font-weight: 700;
+}
+
+.est-price {
+  font-size: clamp(1.75rem, 9vw, 2.25rem);
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.est-text {
+  display: flex;
+  width: 100%;
+  min-height: 56px;
+  font-size: 1.15rem;
+  text-align: center;
+}
+
+.est-result a[href^='tel:'],
+.est-winter a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+a[href^='tel:'] {
+  white-space: nowrap;
 }
