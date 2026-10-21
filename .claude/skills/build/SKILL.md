@@ -14,7 +14,9 @@ Subagents start with no memory. Every dispatch must include the full brief.
 
 ## Setup
 
-Look at the repo just enough to write a brief: goal, files in scope, definition of done. Keep it short.
+1. Look at the repo just enough to write a brief: goal, files in scope, definition of done. Keep it short.
+2. Baseline: dispatch the checker on the untouched repo. Tell it this is a baseline run, there is no change to review yet.
+3. If the baseline is not ALL GREEN: stop before cycle 1. Show me the failures and ask whether fixing them is part of the task.
 
 ## Cycle
 
@@ -25,29 +27,32 @@ Print "Cycle N of 5" at the start of each cycle.
    - Later cycles: send the brief, then the checker's full FAILED section verbatim, and tell it to fix those failures.
 2. If the builder says it stopped (task ambiguous, test looks wrong, can't proceed): don't run the checker. Stop and show me its reason.
 3. Dispatch the checker subagent. Send the brief and the builder's report.
-4. Compare the checker report with the previous one, then apply the stop rules.
+4. Keep a log of every builder report and checker report. Compare the new checker report with the previous one (the baseline on cycle 1), then apply the stop rules.
 
 ## Stop rules
 
 Check these in order after every checker report:
 
-1. ALL GREEN: stop. Done.
-2. FAILED with exactly the same failures as the previous report (same file:line, same error): stop. The builder is stuck; another cycle won't help.
-3. FAILED on cycle 5: stop. Out of cycles.
-4. Otherwise: start the next cycle.
+1. All green: every check passes. Stop and report success.
+2. Regression: tests or types passed in the previous report and fail now. Stop and escalate to me. A lint check going red is not a regression; treat it as a normal failure.
+3. Same failure twice in a row: any failure in this report also appeared in the previous one. Match on file and error text, not line number; lines shift when code is edited. Stop and escalate to me. The builder is guessing.
+4. 5 cycles used: stop.
+5. Otherwise: start the next cycle.
 
-If some failures got fixed and new ones appeared, that counts as progress. Continue, but mention it.
+Never report success without checker output from the final cycle.
+Never weaken, skip, or delete a check to reach all green, and never accept a change that does.
 
 ## Final output
 
-On ALL GREEN:
+On all green:
 - `git status --short` output
 - The builder's last report
-- The checker's full final output
+- The checker's full final output, as proof
 - If every check was SKIPPED, say clearly that nothing was actually verified.
 
 On any other stop:
 - Which stop rule fired and on which cycle
 - The checker's full last report
-- What changed between the last two reports
+- What still fails
+- What was tried: one line per cycle from the builder reports
 - Your read on why it's stuck and what I should decide

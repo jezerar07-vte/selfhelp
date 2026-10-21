@@ -18,11 +18,15 @@ Then review the change (`git diff` and `git status`, including untracked files).
 - Tests deleted, skipped (.skip, .only, xit), or with assertions loosened
 - Hardcoded expected values or test-only branches
 - New @ts-ignore, @ts-expect-error, `any` casts, or eslint-disable comments used to silence a check
+- Check config relaxed: tsconfig options loosened, lint rules turned off, test files excluded, or the test/lint scripts in package.json changed to do less
 - Changes unrelated to the task
 
+On a baseline run there is no change yet: run the three checks and skip the review.
+
 Report in this exact format:
-- All pass: ALL GREEN, then one line per check: pass or SKIPPED
-- Any fail: FAILED, then one entry per cause:
+- First line: ALL GREEN if nothing failed, otherwise FAILED
+- Then always one status line per check: tests, types, lint, review, each pass, fail, or SKIPPED
+- If FAILED, then one entry per cause:
   file:line - what broke - which check caught it (tests, types, lint, or review)
   followed by the real error text, indented, verbatim
 
