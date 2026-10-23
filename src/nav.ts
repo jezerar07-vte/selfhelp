@@ -16,7 +16,12 @@ export function setupNav(root: Document): void {
   };
   const isOpen = () => button.getAttribute('aria-expanded') === 'true';
 
-  button.addEventListener('click', () => setOpen(!isOpen()));
+  button.addEventListener('click', () => {
+    const open = !isOpen();
+    setOpen(open);
+    // The menu precedes the button in DOM order, so hand keyboard focus to its first link.
+    if (open) list.querySelector<HTMLElement>('a')?.focus();
+  });
 
   root.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && isOpen()) {
