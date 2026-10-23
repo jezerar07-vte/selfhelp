@@ -1,0 +1,672 @@
+// ============================================================
+// VOF-OTE v2.1 STRATEGY (BACKTEST VERSION)
+// Backtest version of the VOF-OTE v2.1 indicator (pine/vof-ote.pine).
+// Signal logic is identical; use the indicator file for live use.
+// TradingView Pine Script v6
+// ============================================================
+// BACKTEST ASSUMPTIONS:
+//   - 1 contract per trade default in strategy(); actual size comes from the
+//     risk formula below (max loss per trade / stop distance, capped).
+//   - Commission $0.62 per contract, slippage 1 tick, initial capital $50,000.
+//   - Signals are evaluated on confirmed bars only (bar close). The market
+//     order fills at the NEXT bar open, so realized risk can differ slightly
+//     from the $ risk computed at the signal bar close.
+//   - SL/TP are captured at signal time and sent once as a bracket exit.
+//   - One trade at a time: signals while a position is open are ignored.
+//   - Trades only between the Start Date and End Date inputs.
+// ============================================================
+
+//@version=6
+strategy("VOF-OTE v2.1 Strategy", shorttitle="VOFOTE STR", overlay=true, initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.62, slippage=1, pyramiding=0, calc_on_every_tick=false, process_orders_on_close=false, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// ════════════════════════════════════════════════════════════
+// GROUP 1 — INSTRUMENT & RISK
+// ════════════════════════════════════════════════════════════
+g_risk = "⚙️ Instrument & Risk"
+instrument    = input.string("MNQ",  "Instrument",            options=["ES","NQ","MES","MNQ"], group=g_risk)
+account_size  = input.float(50000,   "Account Size ($)",       group=g_risk, minval=1000)
+max_loss_usd  = input.float(200,     "Max Loss Per Trade ($)", group=g_risk, minval=10)
+rr_ratio      = input.float(3.0,     "Risk:Reward Target",     group=g_risk, minval=0.5, step=0.5)
+max_contracts = input.int(10,        "Max Contracts Cap",      group=g_risk, minval=1)
+
+// ════════════════════════════════════════════════════════════
+// GROUP 2 — SESSION FILTER
+// ════════════════════════════════════════════════════════════
+g_sess = "🕘 Session Filter"
+use_session_filter = input.bool(true,  "Enable Session Filter",              group=g_sess,
+     tooltip="Only fires signals during enabled session windows")
+show_session_bg    = input.bool(false, "Highlight Active Sessions",          group=g_sess)
+
+// — Individual session toggles — all times in EST / New York time
+sess_asia_on   = input.bool(true,  "Asian Session   (7:00 PM – 2:00 AM)",  group=g_sess,
+     tooltip="CME Globex overnight — lower volume but valid swing setups on NQ/ES")
+sess_london_on = input.bool(true,  "London Session  (3:00 AM – 8:30 AM)", group=g_sess,
+     tooltip="High institutional activity — strong trend moves common")
+sess_overlap_on = input.bool(true, "London/NY Overlap (8:00 AM – 11:00 AM)", group=g_sess,
+     tooltip="Highest volume window of the day — best signal quality")
+sess_ny_on     = input.bool(true,  "NY Morning      (11:00 AM – 1:30 PM)", group=g_sess,
+     tooltip="Post-overlap continuation moves")
+sess_ny_pm_on  = input.bool(true,  "NY Afternoon    (1:30 PM – 5:00 PM)", group=g_sess,
+     tooltip="Extended NY close — good for swing continuation entries")
+
+// Session time strings (EST / America/New_York)
+// Asian: 19:00 prev day to 02:00 — Pine Script handles overnight via 1900-0200
+in_sess_asia    = sess_asia_on    and not na(time(timeframe.period, "1900-0200", "America/New_York"))
+in_sess_london  = sess_london_on  and not na(time(timeframe.period, "0300-0830", "America/New_York"))
+in_sess_overlap = sess_overlap_on and not na(time(timeframe.period, "0800-1100", "America/New_York"))
+in_sess_ny      = sess_ny_on      and not na(time(timeframe.period, "1100-1330", "America/New_York"))
+in_sess_ny_pm   = sess_ny_pm_on   and not na(time(timeframe.period, "1330-1700", "America/New_York"))
+
+in_session = in_sess_asia or in_sess_london or in_sess_overlap or in_sess_ny or in_sess_ny_pm
+
+// Session background colors
+bgcolor(show_session_bg and in_sess_asia    ? color.new(color.navy,   93) : na, title="Asian Session BG")
+bgcolor(show_session_bg and in_sess_london  ? color.new(color.orange, 93) : na, title="London Session BG")
+bgcolor(show_session_bg and in_sess_overlap ? color.new(color.blue,   90) : na, title="Overlap Session BG")
+bgcolor(show_session_bg and in_sess_ny      ? color.new(color.teal,   93) : na, title="NY Morning BG")
+bgcolor(show_session_bg and in_sess_ny_pm   ? color.new(color.purple, 93) : na, title="NY Afternoon BG")
+
+// Gate: if filter is on, bar must be in an enabled session
+session_ok = not use_session_filter or in_session
+
+// ════════════════════════════════════════════════════════════
+// GROUP 3 — NEWS / ECONOMIC CALENDAR BLACKOUT
+// ════════════════════════════════════════════════════════════
+g_news = "📰 News Blackout"
+use_news_filter   = input.bool(true,  "Enable News Blackout",         group=g_news,
+     tooltip="Suppresses all signals on high-impact news days")
+block_nfp         = input.bool(true,  "Block NFP (1st Friday/month)", group=g_news)
+block_fomc        = input.bool(false, "Block FOMC Wednesdays",        group=g_news,
+     tooltip="Rough proxy only: blocks every 2nd and 3rd Wednesday (about 24 days/yr), which are not the real FOMC dates. Manual blackout dates below are recommended.")
+manual_news_today = input.bool(false, "🔴 Manual: Block Today (toggle on news days)", group=g_news,
+     tooltip="Flip ON on CPI, PPI, GDP, earnings days")
+
+// Manual blackout dates — user enters up to 4 specific dates
+// Script checks if current bar falls on any of these calendar days
+bd1 = input.time(0, "Blackout Date 1 (0 = off)", group=g_news)
+bd2 = input.time(0, "Blackout Date 2 (0 = off)", group=g_news)
+bd3 = input.time(0, "Blackout Date 3 (0 = off)", group=g_news)
+bd4 = input.time(0, "Blackout Date 4 (0 = off)", group=g_news)
+
+// A bar is on a given date if it falls within that calendar day (86400000 ms = 24 hrs)
+on_date(ts) =>
+    ts > 0 and time >= ts and time < ts + 86400000
+
+is_manual_blackout = on_date(bd1) or on_date(bd2) or on_date(bd3) or on_date(bd4)
+
+// NFP: first Friday of every month (day of week = Friday, day of month 1–7)
+is_nfp_day = block_nfp and dayofweek == dayofweek.friday and dayofmonth <= 7
+
+// FOMC: rough proxy only (2nd and 3rd Wednesdays). Use the manual dates (bd1–bd4) for precision.
+is_fomc_proxy = block_fomc and dayofweek == dayofweek.wednesday and dayofmonth >= 8 and dayofmonth <= 21
+
+// Combined news gate
+is_news_blocked = use_news_filter and (manual_news_today or is_manual_blackout or is_nfp_day or is_fomc_proxy)
+news_ok = not is_news_blocked
+
+// Visual: faint red background on blocked news days
+bgcolor(is_news_blocked ? color.new(color.red, 94) : na, title="News Blackout BG")
+
+// ════════════════════════════════════════════════════════════
+// GROUP 4 — VOLUME & ORDER FLOW
+// ════════════════════════════════════════════════════════════
+g_vol = "📊 Volume & Order Flow"
+vol_ma_len     = input.int(20,   "Volume MA Length",       group=g_vol, minval=5)
+rvol_min       = input.float(1.3,"Min RVOL to Confirm",   group=g_vol, minval=1.0, step=0.1)
+cvd_len        = input.int(14,   "CVD Smoothing Length",  group=g_vol, minval=3)
+show_vol_delta = input.bool(false,"Show Volume Delta Color",group=g_vol)
+
+// ════════════════════════════════════════════════════════════
+// GROUP 5 — OTE / STRUCTURE SETTINGS
+// ════════════════════════════════════════════════════════════
+g_ote = "🎯 OTE & Structure"
+swing_len    = input.int(8,     "Swing Left Bars",        group=g_ote, minval=3)
+swing_right  = input.int(2,     "Swing Confirm Bars (right)", group=g_ote, minval=1,
+     tooltip="Bars to the right needed to confirm a swing. Lower = earlier but noisier swings.")
+ote_fib_low  = input.float(0.62,"OTE Zone Low (Fib)",    group=g_ote, minval=0.5, maxval=0.9,  step=0.01)
+ote_fib_mid  = input.float(0.705,"OTE Midpoint (Fib)",   group=g_ote, minval=0.5, maxval=0.9,  step=0.005)
+ote_fib_high = input.float(0.79,"OTE Zone High (Fib)",   group=g_ote, minval=0.5, maxval=0.95, step=0.01)
+show_ote     = input.bool(true, "Show OTE Zones",         group=g_ote)
+show_fvg     = input.bool(true, "Show Fair Value Gaps",   group=g_ote)
+show_bos     = input.bool(true, "Show Break of Structure",group=g_ote)
+require_fvg_in_ote = input.bool(true, "Require FVG Inside OTE Zone [UPGRADE #3]", group=g_ote,
+     tooltip="When on, the FVG score item is only met if a recent FVG overlaps the OTE zone. When off, it always counts as met.")
+fvg_lookback = input.int(30, "FVG Lookback (bars)",       group=g_ote, minval=5,
+     tooltip="How many bars back to search for a qualifying FVG within the OTE zone")
+max_fvg_boxes = input.int(3, "Max FVG Boxes",             group=g_ote, minval=1, maxval=20,
+     tooltip="Most recent FVG boxes kept per side")
+show_ifvg    = input.bool(false, "Show IFVG",             group=g_ote)
+
+// ════════════════════════════════════════════════════════════
+// GROUP 6 — MULTI-TIMEFRAME
+// ════════════════════════════════════════════════════════════
+g_mtf = "🕐 Multi-Timeframe"
+htf          = input.timeframe("240", "HTF for Trend Bias (240=4H recommended for swing)", group=g_mtf)
+htf_ema_fast = input.int(20, "HTF EMA Fast",               group=g_mtf, minval=5)
+htf_ema_slow = input.int(50, "HTF EMA Slow",               group=g_mtf, minval=10)
+show_htf_bg  = input.bool(false, "Show HTF Bias Background",group=g_mtf)
+
+// ════════════════════════════════════════════════════════════
+// GROUP 7 — SIGNALS
+// ════════════════════════════════════════════════════════════
+g_sig = "🚦 Signals"
+min_score  = input.int(4, "Min Score to Signal", group=g_sig, minval=1, maxval=6,
+     tooltip="Minimum confluence score (out of 6). Price must also have tapped the OTE zone.")
+
+// ════════════════════════════════════════════════════════════
+// GROUP 7b — BACKTEST
+// ════════════════════════════════════════════════════════════
+g_bt = "🧪 Backtest"
+bt_start = input.time(timestamp("2024-10-23T00:00:00"), "Start Date", group=g_bt)
+bt_end   = input.time(timestamp("2099-12-31T00:00:00"), "End Date",   group=g_bt)
+in_range = time >= bt_start and time <= bt_end
+
+// ════════════════════════════════════════════════════════════
+// GROUP 8 — DISPLAY
+// ════════════════════════════════════════════════════════════
+g_disp = "🖥️ Display"
+show_signals = input.bool(true,  "Show Entry Signals",  group=g_disp)
+show_sl_tp   = input.bool(true,  "Show SL / TP Lines",  group=g_disp)
+show_stats   = input.bool(true,  "Show Stats Table",    group=g_disp)
+show_swings  = input.bool(false, "Show Swing Points",   group=g_disp)
+tbl_pos_in   = input.string("top_right", "Table Position", group=g_disp,
+     options=["top_right", "top_left", "bottom_right", "bottom_left"])
+
+tbl_pos = switch tbl_pos_in
+    "top_left"     => position.top_left
+    "bottom_right" => position.bottom_right
+    "bottom_left"  => position.bottom_left
+    => position.top_right
+
+// ════════════════════════════════════════════════════════════
+// INSTRUMENT SPECS
+// ════════════════════════════════════════════════════════════
+// Size from the chart's own point value, so a mismatched Instrument setting can't mis-size backtest trades
+dollar_per_point = syminfo.pointvalue
+
+// ════════════════════════════════════════════════════════════
+// MULTI-TIMEFRAME TREND FILTER (previous completed HTF bar, no repaint)
+// ════════════════════════════════════════════════════════════
+htf_ema_f = request.security(syminfo.tickerid, htf, ta.ema(close, htf_ema_fast)[1], lookahead=barmerge.lookahead_on)
+htf_ema_s = request.security(syminfo.tickerid, htf, ta.ema(close, htf_ema_slow)[1],  lookahead=barmerge.lookahead_on)
+htf_close = request.security(syminfo.tickerid, htf, close[1], lookahead=barmerge.lookahead_on)
+
+htf_bull = htf_ema_f > htf_ema_s and htf_close > htf_ema_f
+htf_bear = htf_ema_f < htf_ema_s and htf_close < htf_ema_f
+
+bgcolor(show_htf_bg and htf_bull ? color.new(color.teal,   96) : na, title="Bullish HTF BG")
+bgcolor(show_htf_bg and htf_bear ? color.new(color.maroon, 96) : na, title="Bearish HTF BG")
+
+// ════════════════════════════════════════════════════════════
+// VOLUME ANALYSIS
+// ════════════════════════════════════════════════════════════
+vol_ma    = ta.sma(volume, vol_ma_len)
+rvol      = volume / vol_ma
+high_vol  = rvol >= rvol_min
+
+candle_range = high - low
+buy_vol   = candle_range > 0 ? volume * ((close - low)  / candle_range) : volume * 0.5
+sell_vol  = candle_range > 0 ? volume * ((high - close) / candle_range) : volume * 0.5
+vol_delta = buy_vol - sell_vol
+
+var float cvd = 0.0
+cvd      := cvd + vol_delta
+cvd_ema   = ta.ema(cvd, cvd_len)
+cvd_bull  = cvd > cvd_ema
+cvd_bear  = cvd < cvd_ema
+
+bull_delta = vol_delta > 0
+barcolor(show_vol_delta ? (bull_delta ? color.new(color.lime, 40) : color.new(color.red, 40)) : na, title="Delta Bar Color")
+
+// ════════════════════════════════════════════════════════════
+// SWING HIGH / LOW DETECTION (confirmed after swing_right bars)
+// ════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, swing_len, swing_right)
+pl = ta.pivotlow(low,  swing_len, swing_right)
+hh_since = ta.highest(high, swing_right + 1)  // highest high from the pivot bar to now
+ll_since = ta.lowest(low,  swing_right + 1)   // lowest low from the pivot bar to now
+
+var float last_ph     = na
+var float last_pl     = na
+var int   last_ph_bar = na
+var int   last_pl_bar = na
+
+if not na(ph)
+    last_ph     := ph
+    last_ph_bar := bar_index - swing_right
+if not na(pl)
+    last_pl     := pl
+    last_pl_bar := bar_index - swing_right
+
+plotshape(show_swings and not na(ph), "Swing High", shape.triangledown, location.abovebar,
+     color.new(color.red,  20), size=size.tiny, offset=-swing_right)
+plotshape(show_swings and not na(pl), "Swing Low",  shape.triangleup,   location.belowbar,
+     color.new(color.lime, 20), size=size.tiny, offset=-swing_right)
+
+// ════════════════════════════════════════════════════════════
+// REAL-TIME LEGS + BREAK OF STRUCTURE
+// ════════════════════════════════════════════════════════════
+// Long leg: anchored on the latest confirmed swing low, high tracked live.
+var float l_low      = na
+var float l_high     = na
+var int   l_low_bar  = na
+var float l_break    = na   // swing high in force when the leg started
+var int   l_break_bar = na
+var bool  l_alive    = false
+var bool  l_active   = false
+var bool  l_used     = false
+
+// Short leg: mirror, anchored on the latest confirmed swing high.
+var float s_high     = na
+var float s_low      = na
+var int   s_high_bar = na
+var float s_break    = na   // swing low in force when the leg started
+var int   s_break_bar = na
+var bool  s_alive    = false
+var bool  s_active   = false
+var bool  s_used     = false
+
+if not na(pl)
+    l_low       := pl
+    l_low_bar   := bar_index - swing_right
+    l_high      := hh_since
+    // Break level: latest confirmed swing high strictly before the anchor bar and still unbroken
+    l_break     := not na(last_ph_bar) and last_ph_bar < l_low_bar and last_ph > hh_since ? last_ph : na
+    l_break_bar := na(l_break) ? na : last_ph_bar
+    l_alive     := true
+    l_active    := false
+    l_used      := false
+else if l_alive
+    l_high := math.max(l_high, high)
+
+if not na(ph)
+    s_high      := ph
+    s_high_bar  := bar_index - swing_right
+    s_low       := ll_since
+    s_break     := not na(last_pl_bar) and last_pl_bar < s_high_bar and last_pl < ll_since ? last_pl : na
+    s_break_bar := na(s_break) ? na : last_pl_bar
+    s_alive     := true
+    s_active    := false
+    s_used      := false
+else if s_alive
+    s_low := math.min(s_low, low)
+
+// Invalidate on a close through the anchor
+if l_alive and close < l_low
+    l_alive  := false
+    l_active := false
+if s_alive and close > s_high
+    s_alive  := false
+    s_active := false
+
+// Activation = BOS
+bos_bull = false
+bos_bear = false
+if l_alive and not l_active and not na(l_break) and l_high > l_break
+    l_active := true
+    bos_bull := true
+if s_alive and not s_active and not na(s_break) and s_low < s_break
+    s_active := true
+    bos_bear := true
+
+if show_bos and bos_bull
+    line.new(l_break_bar, l_break, bar_index, l_break,
+         color=color.new(color.aqua, 30), width=1, style=line.style_dashed)
+    label.new(bar_index, l_break, "BOS", style=label.style_label_left,
+         color=color.new(color.aqua, 20), textcolor=color.white, size=size.tiny)
+
+if show_bos and bos_bear
+    line.new(s_break_bar, s_break, bar_index, s_break,
+         color=color.new(color.orange, 30), width=1, style=line.style_dashed)
+    label.new(bar_index, s_break, "BOS", style=label.style_label_left,
+         color=color.new(color.orange, 20), textcolor=color.white, size=size.tiny)
+
+// ════════════════════════════════════════════════════════════
+// FAIR VALUE GAP (FVG)
+// ════════════════════════════════════════════════════════════
+// Bullish FVG: gap between bar[2].high and bar[0].low — price left an unmitigated gap upward
+// Bearish FVG: gap between bar[2].low and bar[0].high — price left an unmitigated gap downward
+bull_fvg_raw = low  > high[2] and close[1] > high[2]
+bear_fvg_raw = high < low[2]  and close[1] < low[2]
+
+// Track the most recent FVG boundaries for OTE overlap check
+var float last_bull_fvg_top = na  // upper boundary of last bullish FVG
+var float last_bull_fvg_bot = na  // lower boundary of last bullish FVG
+var int   last_bull_fvg_bar = na
+var float last_bear_fvg_top = na
+var float last_bear_fvg_bot = na
+var int   last_bear_fvg_bar = na
+
+if bull_fvg_raw
+    last_bull_fvg_top := low      // Current bar low = top of the gap
+    last_bull_fvg_bot := high[2]  // Two bars ago high = bottom of the gap
+    last_bull_fvg_bar := bar_index
+
+if bear_fvg_raw
+    last_bear_fvg_top := low[2]   // Two bars ago low = top of the gap
+    last_bear_fvg_bot := high     // Current bar high = bottom of the gap
+    last_bear_fvg_bar := bar_index
+
+// Keep only the most recent boxes per side
+var array<box> bull_fvg_boxes = array.new<box>()
+var array<box> bear_fvg_boxes = array.new<box>()
+
+if show_fvg and bull_fvg_raw
+    array.push(bull_fvg_boxes, box.new(bar_index - 2, low, bar_index + 10, high[2],
+         border_color=color.new(color.lime, 60),
+         bgcolor=color.new(color.lime, 88),
+         border_style=line.style_dotted,
+         text="FVG", text_size=size.tiny, text_color=color.new(color.lime, 30)))
+    if array.size(bull_fvg_boxes) > max_fvg_boxes
+        box.delete(array.shift(bull_fvg_boxes))
+
+if show_fvg and bear_fvg_raw
+    array.push(bear_fvg_boxes, box.new(bar_index - 2, low[2], bar_index + 10, high,
+         border_color=color.new(color.red, 60),
+         bgcolor=color.new(color.red, 88),
+         border_style=line.style_dotted,
+         text="FVG", text_size=size.tiny, text_color=color.new(color.red, 30)))
+    if array.size(bear_fvg_boxes) > max_fvg_boxes
+        box.delete(array.shift(bear_fvg_boxes))
+
+// ════════════════════════════════════════════════════════════
+// IFVG — INVERTED FAIR VALUE GAP (edge-triggered)
+// ════════════════════════════════════════════════════════════
+// Price closing THROUGH a recent bullish FVG (below its bottom) flips it to resistance (bear IFVG).
+// Price closing THROUGH a recent bearish FVG (above its top) flips it to support (bull IFVG).
+bull_fvg_recent = not na(last_bull_fvg_bar) and (bar_index - last_bull_fvg_bar) <= fvg_lookback
+bear_fvg_recent = not na(last_bear_fvg_bar) and (bar_index - last_bear_fvg_bar) <= fvg_lookback
+
+bull_ifvg_state = bull_fvg_recent and not na(last_bull_fvg_bot) and close < last_bull_fvg_bot
+bear_ifvg_state = bear_fvg_recent and not na(last_bear_fvg_top) and close > last_bear_fvg_top
+
+bull_ifvg = bull_ifvg_state and not bull_ifvg_state[1]
+bear_ifvg = bear_ifvg_state and not bear_ifvg_state[1]
+
+if show_ifvg and bull_ifvg
+    box.new(bar_index, last_bull_fvg_bot, bar_index + 10, last_bull_fvg_bot - (last_bull_fvg_top - last_bull_fvg_bot),
+         border_color=color.new(color.orange, 40),
+         bgcolor=color.new(color.orange, 85),
+         border_style=line.style_dashed,
+         text="IFVG", text_size=size.tiny, text_color=color.new(color.orange, 20))
+
+if show_ifvg and bear_ifvg
+    box.new(bar_index, last_bear_fvg_top, bar_index + 10, last_bear_fvg_top + (last_bear_fvg_top - last_bear_fvg_bot),
+         border_color=color.new(color.aqua, 40),
+         bgcolor=color.new(color.aqua, 85),
+         border_style=line.style_dashed,
+         text="IFVG", text_size=size.tiny, text_color=color.new(color.aqua, 20))
+
+// ════════════════════════════════════════════════════════════
+// OTE ZONES (live, from the real-time legs)
+// ════════════════════════════════════════════════════════════
+l_rng = l_high - l_low
+s_rng = s_high - s_low
+
+ote_long_top  = l_active ? l_high - l_rng * ote_fib_low  : na
+ote_long_mid  = l_active ? l_high - l_rng * ote_fib_mid  : na
+ote_long_bot  = l_active ? l_high - l_rng * ote_fib_high : na
+ote_short_bot = s_active ? s_low + s_rng * ote_fib_low   : na
+ote_short_mid = s_active ? s_low + s_rng * ote_fib_mid   : na
+ote_short_top = s_active ? s_low + s_rng * ote_fib_high  : na
+
+// Tapped the zone and did not close through it
+// Leg must have been active on the previous bar and this bar must not set a new leg extreme (excludes the BOS/impulse bar)
+in_ote_long  = l_active and l_active[1] and high <= l_high[1] and low  <= ote_long_top  and close >= ote_long_bot
+in_ote_short = s_active and s_active[1] and low  >= s_low[1]  and high >= ote_short_bot and close <= ote_short_top
+
+// One box + one midline per side, created once and updated in place
+var box  ote_l_box = na
+var box  ote_s_box = na
+var line ote_l_line = na
+var line ote_s_line = na
+
+if show_ote and l_active
+    if na(ote_l_box)
+        ote_l_box := box.new(l_low_bar, ote_long_top, bar_index + 5, ote_long_bot,
+             border_color=color.new(color.green, 20), border_width=1,
+             bgcolor=color.new(color.green, 85),
+             text="OTE", text_size=size.tiny, text_color=color.new(color.green, 20))
+        ote_l_line := line.new(l_low_bar, ote_long_mid, bar_index + 5, ote_long_mid,
+             color=color.new(color.green, 30), width=1, style=line.style_dashed)
+    else
+        box.set_lefttop(ote_l_box, l_low_bar, ote_long_top)
+        box.set_rightbottom(ote_l_box, bar_index + 5, ote_long_bot)
+        line.set_xy1(ote_l_line, l_low_bar, ote_long_mid)
+        line.set_xy2(ote_l_line, bar_index + 5, ote_long_mid)
+else if not na(ote_l_box)
+    box.delete(ote_l_box)
+    line.delete(ote_l_line)
+    ote_l_box  := na
+    ote_l_line := na
+
+if show_ote and s_active
+    if na(ote_s_box)
+        ote_s_box := box.new(s_high_bar, ote_short_top, bar_index + 5, ote_short_bot,
+             border_color=color.new(color.red, 20), border_width=1,
+             bgcolor=color.new(color.red, 85),
+             text="OTE", text_size=size.tiny, text_color=color.new(color.red, 20))
+        ote_s_line := line.new(s_high_bar, ote_short_mid, bar_index + 5, ote_short_mid,
+             color=color.new(color.red, 30), width=1, style=line.style_dashed)
+    else
+        box.set_lefttop(ote_s_box, s_high_bar, ote_short_top)
+        box.set_rightbottom(ote_s_box, bar_index + 5, ote_short_bot)
+        line.set_xy1(ote_s_line, s_high_bar, ote_short_mid)
+        line.set_xy2(ote_s_line, bar_index + 5, ote_short_mid)
+else if not na(ote_s_box)
+    box.delete(ote_s_box)
+    line.delete(ote_s_line)
+    ote_s_box  := na
+    ote_s_line := na
+
+// ════════════════════════════════════════════════════════════
+// FVG-IN-OTE CONFLUENCE CHECK
+// ════════════════════════════════════════════════════════════
+// Overlap: the two ranges [A_bot, A_top] and [B_bot, B_top] overlap when A_bot <= B_top AND A_top >= B_bot
+fvg_in_ote_long = bull_fvg_recent and
+     not na(ote_long_bot) and not na(ote_long_top) and
+     not na(last_bull_fvg_bot) and not na(last_bull_fvg_top) and
+     last_bull_fvg_bot <= ote_long_top and last_bull_fvg_top >= ote_long_bot
+
+fvg_in_ote_short = bear_fvg_recent and
+     not na(ote_short_bot) and not na(ote_short_top) and
+     not na(last_bear_fvg_bot) and not na(last_bear_fvg_top) and
+     last_bear_fvg_bot <= ote_short_top and last_bear_fvg_top >= ote_short_bot
+
+// If the requirement is off, the FVG item counts as met
+fvg_long_ok  = not require_fvg_in_ote or fvg_in_ote_long
+fvg_short_ok = not require_fvg_in_ote or fvg_in_ote_short
+
+// ════════════════════════════════════════════════════════════
+// CONFLUENCE SCORE
+// ════════════════════════════════════════════════════════════
+long_cond_htf  = htf_bull
+long_cond_ote  = in_ote_long
+long_cond_vol  = high_vol
+long_cond_cvd  = cvd_bull
+long_cond_bar  = close > open and (close - open) > (high - low) * 0.2
+long_cond_fvg  = fvg_long_ok
+
+short_cond_htf  = htf_bear
+short_cond_ote  = in_ote_short
+short_cond_vol  = high_vol
+short_cond_cvd  = cvd_bear
+short_cond_bar  = close < open and (open - close) > (high - low) * 0.2
+short_cond_fvg  = fvg_short_ok
+
+long_score  = (long_cond_htf  ? 1 : 0) + (long_cond_ote  ? 1 : 0) + (long_cond_vol ? 1 : 0) +
+              (long_cond_cvd  ? 1 : 0) + (long_cond_bar   ? 1 : 0) + (long_cond_fvg ? 1 : 0)
+short_score = (short_cond_htf ? 1 : 0) + (short_cond_ote  ? 1 : 0) + (short_cond_vol ? 1 : 0) +
+              (short_cond_cvd ? 1 : 0) + (short_cond_bar  ? 1 : 0) + (short_cond_fvg ? 1 : 0)
+
+// ════════════════════════════════════════════════════════════
+// POSITION SIZING — MAX LOSS PER TRADE
+// ════════════════════════════════════════════════════════════
+long_sl_price  = ote_long_bot  - (ote_long_top  - ote_long_bot)  * 0.05
+short_sl_price = ote_short_top + (ote_short_top - ote_short_bot) * 0.05
+
+long_sl_pts  = close - long_sl_price
+short_sl_pts = short_sl_price - close
+
+long_cts  = long_sl_pts  > 0 ? math.min(math.floor(max_loss_usd / (long_sl_pts  * dollar_per_point)), max_contracts) : 0
+short_cts = short_sl_pts > 0 ? math.min(math.floor(max_loss_usd / (short_sl_pts * dollar_per_point)), max_contracts) : 0
+
+long_tp_price  = close + long_sl_pts  * rr_ratio
+short_tp_price = close - short_sl_pts * rr_ratio
+
+// ════════════════════════════════════════════════════════════
+// SIGNALS — score-driven, one per leg
+// ════════════════════════════════════════════════════════════
+timing_ok = barstate.isconfirmed
+
+long_signal  = long_score  >= min_score and in_ote_long  and session_ok and news_ok and long_cts  >= 1 and not l_used and timing_ok
+short_signal = short_score >= min_score and in_ote_short and session_ok and news_ok and short_cts >= 1 and not s_used and timing_ok
+
+// Consume the leg only on a confirmed bar so intrabar signals that vanish don't burn it
+if long_signal and barstate.isconfirmed
+    l_used := true
+if short_signal and barstate.isconfirmed
+    s_used := true
+
+// ════════════════════════════════════════════════════════════
+// SIGNAL LABELS
+// ════════════════════════════════════════════════════════════
+sess_tag = in_sess_asia ? "ASIA" : in_sess_london ? "LON" : in_sess_overlap ? "OVERLAP" : in_sess_ny ? "NY" : in_sess_ny_pm ? "NY PM" : "-"
+
+var line sig_entry_line = na
+var line sig_sl_line    = na
+var line sig_tp_line    = na
+
+if show_signals and long_signal
+    tip = "LONG [" + sess_tag + "]\n" +
+         "Cts: "   + str.tostring(long_cts) + "\n" +
+         "Entry: " + str.tostring(math.round(close,         2)) + "\n" +
+         "SL: "    + str.tostring(math.round(long_sl_price, 2)) + "\n" +
+         "TP: "    + str.tostring(math.round(long_tp_price, 2)) + "\n" +
+         "Risk: $" + str.tostring(math.round(long_sl_pts * long_cts * dollar_per_point, 0)) + "\n" +
+         "Score: " + str.tostring(long_score) + "/6"
+    label.new(bar_index, low, "▲ L " + str.tostring(long_score),
+         style=label.style_label_up, color=color.new(color.green, 10),
+         textcolor=color.white, size=size.small, tooltip=tip)
+
+if show_signals and short_signal
+    tip = "SHORT [" + sess_tag + "]\n" +
+         "Cts: "   + str.tostring(short_cts) + "\n" +
+         "Entry: " + str.tostring(math.round(close,          2)) + "\n" +
+         "SL: "    + str.tostring(math.round(short_sl_price, 2)) + "\n" +
+         "TP: "    + str.tostring(math.round(short_tp_price, 2)) + "\n" +
+         "Risk: $" + str.tostring(math.round(short_sl_pts * short_cts * dollar_per_point, 0)) + "\n" +
+         "Score: " + str.tostring(short_score) + "/6"
+    label.new(bar_index, high, "▼ S " + str.tostring(short_score),
+         style=label.style_label_down, color=color.new(color.red, 10),
+         textcolor=color.white, size=size.small, tooltip=tip)
+
+// ════════════════════════════════════════════════════════════
+// SL / TP LINES — only the most recent signal
+// ════════════════════════════════════════════════════════════
+if show_sl_tp and long_signal and barstate.isconfirmed
+    if not na(sig_entry_line)
+        line.delete(sig_entry_line)
+        line.delete(sig_sl_line)
+        line.delete(sig_tp_line)
+    sig_entry_line := line.new(bar_index, close,          bar_index + 20, close,
+         color=color.new(color.gray, 20), width=1, style=line.style_dashed)
+    sig_sl_line    := line.new(bar_index, long_sl_price,  bar_index + 20, long_sl_price,
+         color=color.new(color.red,  20), width=2)
+    sig_tp_line    := line.new(bar_index, long_tp_price,  bar_index + 20, long_tp_price,
+         color=color.new(color.lime, 20), width=2)
+
+if show_sl_tp and short_signal and barstate.isconfirmed
+    if not na(sig_entry_line)
+        line.delete(sig_entry_line)
+        line.delete(sig_sl_line)
+        line.delete(sig_tp_line)
+    sig_entry_line := line.new(bar_index, close,           bar_index + 20, close,
+         color=color.new(color.gray, 20), width=1, style=line.style_dashed)
+    sig_sl_line    := line.new(bar_index, short_sl_price,  bar_index + 20, short_sl_price,
+         color=color.new(color.red,  20), width=2)
+    sig_tp_line    := line.new(bar_index, short_tp_price,  bar_index + 20, short_tp_price,
+         color=color.new(color.lime, 20), width=2)
+
+// ════════════════════════════════════════════════════════════
+// COMPACT DASHBOARD
+// ════════════════════════════════════════════════════════════
+c_met  = color.new(color.lime, 0)
+c_fail = color.new(color.red,  20)
+c_na   = color.new(color.gray, 30)
+
+var table dash = table.new(tbl_pos, 3, 12,
+     bgcolor=color.new(#0a0f1e, 70),
+     border_color=color.new(color.gray, 60), border_width=1,
+     frame_color=color.new(color.silver, 40), frame_width=1)
+
+cell(col, row, txt, clr) =>
+    table.cell(dash, col, row, txt, text_color=clr, text_size=size.tiny)
+
+sess_txt = in_sess_asia ? "ASIA" : in_sess_london ? "LONDON" : in_sess_overlap ? "OVERLAP" : in_sess_ny ? "NY" : in_sess_ny_pm ? "NY PM" : (not use_session_filter ? "OFF" : "CLOSED")
+sess_clr = session_ok ? c_met : c_fail
+news_txt = is_news_blocked ? "BLOCKED" : (not use_news_filter ? "OFF" : "CLEAR")
+news_clr = is_news_blocked ? c_fail : (not use_news_filter ? c_na : c_met)
+rvol_txt = str.tostring(math.round(rvol, 2)) + "x"
+
+if show_stats and barstate.islast
+    cell(0, 0, "VOF·OTE v2.1 " + instrument, color.yellow)
+    cell(1, 0, "LONG ▲",  color.lime)
+    cell(2, 0, "SHORT ▼", color.red)
+
+    cell(0, 1, "HTF", color.white)
+    cell(1, 1, long_cond_htf  ? "✔ BULL" : "✘", long_cond_htf  ? c_met : c_fail)
+    cell(2, 1, short_cond_htf ? "✔ BEAR" : "✘", short_cond_htf ? c_met : c_fail)
+
+    cell(0, 2, "In OTE", color.white)
+    cell(1, 2, long_cond_ote  ? "✔" : "✘", long_cond_ote  ? c_met : c_fail)
+    cell(2, 2, short_cond_ote ? "✔" : "✘", short_cond_ote ? c_met : c_fail)
+
+    cell(0, 3, "FVG in OTE", color.white)
+    cell(1, 3, long_cond_fvg  ? "✔" : "✘", long_cond_fvg  ? c_met : c_fail)
+    cell(2, 3, short_cond_fvg ? "✔" : "✘", short_cond_fvg ? c_met : c_fail)
+
+    cell(0, 4, "RVOL", color.white)
+    cell(1, 4, (long_cond_vol  ? "✔ " : "✘ ") + rvol_txt, long_cond_vol  ? c_met : c_fail)
+    cell(2, 4, (short_cond_vol ? "✔ " : "✘ ") + rvol_txt, short_cond_vol ? c_met : c_fail)
+
+    cell(0, 5, "CVD", color.white)
+    cell(1, 5, long_cond_cvd  ? "✔ BUY"  : "✘", long_cond_cvd  ? c_met : c_fail)
+    cell(2, 5, short_cond_cvd ? "✔ SELL" : "✘", short_cond_cvd ? c_met : c_fail)
+
+    cell(0, 6, "Bar", color.white)
+    cell(1, 6, long_cond_bar  ? "✔" : "✘", long_cond_bar  ? c_met : c_fail)
+    cell(2, 6, short_cond_bar ? "✔" : "✘", short_cond_bar ? c_met : c_fail)
+
+    cell(0, 7, "Score", color.white)
+    cell(1, 7, str.tostring(long_score)  + "/6 (min " + str.tostring(min_score) + ")", long_score  >= min_score ? c_met : color.orange)
+    cell(2, 7, str.tostring(short_score) + "/6 (min " + str.tostring(min_score) + ")", short_score >= min_score ? c_met : color.orange)
+
+    cell(0, 8, "Session", color.white)
+    cell(1, 8, sess_txt, sess_clr)
+    cell(2, 8, sess_txt, sess_clr)
+
+    cell(0, 9, "News", color.white)
+    cell(1, 9, news_txt, news_clr)
+    cell(2, 9, news_txt, news_clr)
+
+    cell(0, 10, "Contracts", color.white)
+    cell(1, 10, str.tostring(long_cts),  long_cts  >= 1 ? c_met : c_fail)
+    cell(2, 10, str.tostring(short_cts), short_cts >= 1 ? c_met : c_fail)
+
+    cell(0, 11, "Signal", color.white)
+    cell(1, 11, long_signal  ? "FIRE" : "—", long_signal  ? color.lime : c_na)
+    cell(2, 11, short_signal ? "FIRE" : "—", short_signal ? color.red  : c_na)
+
+// ════════════════════════════════════════════════════════════
+// ORDERS — one trade at a time, SL/TP fixed at signal time
+// ════════════════════════════════════════════════════════════
+// Fill happens at the next bar open, so realized risk can differ slightly from the $ shown.
+// strategy.exit is issued once on the signal bar and persists until filled.
+if long_signal and in_range and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=long_cts)
+    strategy.exit("Long X", from_entry="Long", stop=long_sl_price, limit=long_tp_price)
+
+if short_signal and not long_signal and in_range and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=short_cts)
+    strategy.exit("Short X", from_entry="Short", stop=short_sl_price, limit=short_tp_price)
