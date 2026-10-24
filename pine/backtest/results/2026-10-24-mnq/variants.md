@@ -4,6 +4,7 @@ MNQ, $200 risk, 1:3, $0.62/side + 1 tick slippage. "Asia off" disables the 19:00
 
 Asia off was chosen after seeing these same results (in-sample), so its improvement is not independent evidence. Breakeven win rate at 1:3 after costs is about 25 percent; no variant has a Wilson lower bound above it.
 
+| TF | Variant | Trades | Win % | Wilson LB % | PF | Avg R | Net $ | Max DD $ | Worst streak |
 |---|---|---|---|---|---|---|---|---|---|
 | 1h | score>=4, all sessions (baseline) | 39 | 30.8 | 18.6 | 1.44 | +0.24 | +1,817 | 1,185 | 7 |
 | 1h | score>=4, Asia off | 32 | 34.4 | 20.4 | 1.74 | +0.39 | +2,295 | 765 | 4 |
