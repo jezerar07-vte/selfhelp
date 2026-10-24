@@ -93,6 +93,33 @@ Both return a DataFrame indexed by tz-aware America/New_York bar-open timestamps
 * R multiple = net P&L / (|entry - SL| x qty x $/pt), using the actual (slipped) entry.
 * The legs, BOS, FVG and scoring run over all data (warm-up) even before `--start`.
 
+## Research (`research.py`)
+
+Pre-registered comparison of VOF-OTE (24-variant grid), RSI(2) mean reversion and intraday momentum, with a
+TRAIN/TEST split. Offline only: it reads the cached Yahoo JSON and never downloads.
+
+    python3 -B pine/backtest/research.py --cache-dir DIR --out-dir DIR [--timeframes 1h,5m,15m]
+
+Writes `research.md` (method, TEST table, TRAIN/FULL table, verdict, appendix of all 24 variants), `results.json` and
+`trades_test_<strategy>_<tf>.csv`. Everything goes through `simulate()` (same costs and fills); the rules are in the
+"Method" section of the generated `research.md`. Approximations:
+
+* Each window (TRAIN first 60% of tradable bars, TEST last 40%, FULL) is simulated on its own bar slice, so no trade
+  crosses the boundary and trades still open at a window end are dropped. Indicators warm up on the whole series (causal).
+* `simulate()` got two additive features: signal key `rule(i)` (exit at the bar close or next open, 1 tick slipped) and
+  `tp=None` (no target). `run_backtest()` got an optional precomputed `rows`. Existing behaviour is unchanged.
+* VOF-OTE `rr_ratio` is the existing `rr` parameter. Selection: TRAIN PF >= 1.2, trades >= 20, then highest avg R.
+* RSI(2): Wilder RSI/ATR with an SMA seed (like Pine `ta.rma`); signals only during the five VOF sessions (so not 02-03 and
+  17-19 ET) and outside the NFP day (Friday, day <= 7, Chicago date). A stop wider than $200 per contract (2.5 x ATR x $2)
+  skips the signal, which removes most 1h signals on MNQ at current price levels.
+* Momentum: 10:00 price = open of the 10:00 ET bar; previous close = close of the last bar before 16:00 on the most recent
+  earlier day that has one (so Monday uses Friday). Days missing the 10:00, entry or exit bar (holidays, early closes) are
+  skipped, as are NFP days. 1h trades the last hour (15:00 bar), an approximation of the paper's last half-hour. The stop
+  is 1 x ATR(14) of the bar before entry, placed from the entry-bar open; sizing uses that distance. No exit slippage
+  difference: the 16:00 close exit also takes 1 tick.
+* The Wilson test uses the TEST win rate against breakeven = avg loss / (avg win + avg loss), which already includes costs.
+* Selecting 1 of 24 variants on a small TRAIN set is itself noisy; TEST results with < 30 trades are flagged LOW CONFIDENCE.
+
 ## Disclaimer
 
 Backtests are simulations on historical data with the approximations above. Results are not a guarantee of future

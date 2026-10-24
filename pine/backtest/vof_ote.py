@@ -317,7 +317,10 @@ def compute_signals(df, htf_df=None, **params):
 def simulate(df, signals, **params):
     """signals[i] is None or dict(side, qty, sl, tp, score, session) decided at the close of bar i.
     Entry = bar i+1 open +/- slippage. SL/TP are rounded to the tick. Exits are checked from the entry bar on.
-    Optional signal key `meta` (dict) is copied into the trade row."""
+    Optional signal key `meta` (dict) is copied into the trade row.
+    Optional signal key `rule`: callable(i) -> None | ("open"|"close", reason), called after each bar of the open
+    position (entry bar included). "close" exits at that bar's close, "open" at the next bar's open, both one tick
+    slipped against the position. A signal with tp=None has no target (exits only via SL / rule / end of data)."""
     p = _params(params)
     o, h, l, c = (df[k].to_numpy(float) for k in ("open", "high", "low", "close"))
     slip = p.slippage_ticks * p.tick
@@ -358,8 +361,12 @@ def simulate(df, signals, **params):
 
     for i in range(len(df)):
         if pend is not None:
-            pos = dict(pend, i=i, entry=o[i] + pend["side"] * slip, sig_i=i - 1, sl=tick(pend["sl"]), tp=tick(pend["tp"]))
+            pos = dict(pend, i=i, entry=o[i] + pend["side"] * slip, sig_i=i - 1, sl=tick(pend["sl"]),
+                       tp=tick(pend["tp"]) if pend["tp"] is not None else pend["side"] * math.inf)
             pend = None
+        if pos is not None and pos.get("exit_next"):  # rule exit decided at the previous close
+            close_trade(o[i] - pos["side"] * slip, pos["exit_next"], i, o[i], o[i])
+            pos = None
         if pos is not None:
             d, sl, tp = pos["side"], pos["sl"], pos["tp"]
             if (o[i] <= sl) if d > 0 else (o[i] >= sl):  # opened through the stop: fill at the open + slippage
@@ -380,6 +387,13 @@ def simulate(df, signals, **params):
                     exit_high = (d > 0) == (reason == "TP")
                     close_trade(fill, reason, i, *visible(d, reason, fill, i, high_first != exit_high))
                     pos = None
+            if pos is not None and pos.get("rule"):
+                act = pos["rule"](i)
+                if act and act[0] == "close":
+                    close_trade(c[i] - d * slip, act[1], i, h[i], l[i])
+                    pos = None
+                elif act:
+                    pos["exit_next"] = act[1]
         if pos is None and signals[i] is not None and i + 1 < len(df):
             pend = signals[i]
     if pos is not None:
@@ -422,11 +436,11 @@ def summarize(tr, first, last):
         by_side=_group(tr, "side"), by_session=_group(tr, "session"), by_score=_group(tr, "score"))
 
 
-def run_backtest(df, htf_df=None, **params):
+def run_backtest(df, htf_df=None, rows=None, **params):
     """Returns (closed trades, summary). Signals before the HTF EMAs are valid are excluded and counted; trades still
     open at the end of data are left out of the trades/stats and reported as open_trades / open_unrealized_pnl."""
     p = _params(params)
-    rows = compute_signals(df, htf_df, **params)
+    rows = compute_signals(df, htf_df, **params) if rows is None else rows  # rows: precomputed, aligned with df
     lo = pd.Timestamp(p.start, tz=TZ) if p.start else df.index[0]
     hi = pd.Timestamp(p.end, tz=TZ) if p.end else None  # inclusive: Pine `time <= bt_end` on the bar open time
     sigs, excl_sigs, excl_bars = [], 0, 0
