@@ -1,0 +1,73 @@
+{
+  "trades": 17,
+  "wins": 3,
+  "losses": 14,
+  "win_rate": 0.17647058823529413,
+  "gross_profit": 1032.72,
+  "gross_loss": -2213.66,
+  "net_pnl": -1180.9399999999998,
+  "profit_factor": 0.4665215073678885,
+  "avg_win": 344.24,
+  "avg_loss": -158.1185714285714,
+  "avg_r": -0.33798809189057205,
+  "expectancy": -69.4670588235294,
+  "max_drawdown": 1654.08,
+  "longest_losing_streak": 10,
+  "trades_per_month": 7.391964285714286,
+  "by_side": {
+    "long": {
+      "trades": 9,
+      "net_pnl": -525.8399999999999,
+      "win_rate": 0.2222222222222222
+    },
+    "short": {
+      "trades": 8,
+      "net_pnl": -655.1,
+      "win_rate": 0.125
+    }
+  },
+  "by_session": {
+    "ASIA": {
+      "trades": 5,
+      "net_pnl": 248.7,
+      "win_rate": 0.4
+    },
+    "LON": {
+      "trades": 6,
+      "net_pnl": -1037.32,
+      "win_rate": 0.0
+    },
+    "NY": {
+      "trades": 1,
+      "net_pnl": -162.48,
+      "win_rate": 0.0
+    },
+    "OVERLAP": {
+      "trades": 5,
+      "net_pnl": -229.83999999999997,
+      "win_rate": 0.2
+    }
+  },
+  "by_score": {
+    "4": {
+      "trades": 14,
+      "net_pnl": -698.3,
+      "win_rate": 0.21428571428571427
+    },
+    "5": {
+      "trades": 3,
+      "net_pnl": -482.64,
+      "win_rate": 0.0
+    }
+  },
+  "open_trades": 0,
+  "open_unrealized_pnl": 0.0,
+  "htf_valid_from": "2026-08-14 00:00:00-04:00",
+  "htf_excluded_bars": 0,
+  "htf_excluded_signals": 0,
+  "snapshot_dropped": 1,
+  "timeframe": "15m",
+  "data_start": "2026-08-14 00:00:00-04:00",
+  "data_end": "2026-10-23 16:45:00-04:00",
+  "bars": 4554
+}
